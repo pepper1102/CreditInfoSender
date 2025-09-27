@@ -12,15 +12,11 @@ function sendDailyCardUsageToLINE() {
     const endExclusive = new Date();
     return { name: src.NAME, total: sumMonthlyAmountFromGmail(buildQueryForCard(src.NAME, cycleStart, endExclusive), src.NAME) };
   });
-  console.log(results);
+  //console.log(results);
 
   const message = buildCardUsageMessage(todayStr, results);
   sendLineMessageByPush(message);
 
-  const saveObj = {};
-  for (const r of results) saveObj[r.name] = r.total;
-  props.setProperty(CONFIG.PROPS.LAST_TOTAL, JSON.stringify(saveObj));
-  props.setProperty(CONFIG.PROPS.LAST_DATE, todayStr);
 }
 /**
  * カード利用額の集計結果からLINE送信用メッセージを生成
@@ -109,7 +105,7 @@ function sumMonthlyAmountFromGmail(query, cardName, startInclusive, endInclusive
         const usageDate = extractUsageDate(text, cardName);
         const basisDate = usageDate || msg.getDate();
         if (startInclusive && endInclusive && !inRangeInclusive(basisDate, startInclusive, endInclusive)) continue;
-
+        //console.log(text)
         const delta = sumAmountsMitsui(text);
         total += delta;
       }
@@ -270,7 +266,7 @@ function sumAmountsViewCard(text) {
 function getCardPrevMonthTotal(cardName) {
   const today = new Date();
   const src = CONFIG.GMAIL.SOURCES.find(s => s.NAME === cardName);
-  console.log(src);
+  //console.log(src);
 
   // 「前サイクル」の基準日を作る（今月から1ヶ月前）
   const baseDate = new Date(today.getFullYear(), today.getMonth() - 1, today.getDate());
@@ -405,6 +401,10 @@ function getMtdYesterdayTotalCached(cardName, cycleStart, cycleEnd) {
 
     props.setProperty(lastDateKey, toYmd(yEnd));
     props.setProperty(lastTotalKey, String(total));
+    const saveObj = {};
+    for (const r of results) saveObj[r.name] = r.total;
+    props.setProperty(CONFIG.PROPS.LAST_TOTAL, JSON.stringify(saveObj));
+    props.setProperty(CONFIG.PROPS.LAST_DATE, todayStr);
     return total;
   } finally {
     try { lock.releaseLock(); } catch (e) { }

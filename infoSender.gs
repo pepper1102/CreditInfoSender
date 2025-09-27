@@ -9,6 +9,7 @@ function sendDailyCardUsageToLINE() {
     const endExclusive = new Date();
     return { name: src.NAME, total: sumMonthlyAmountFromGmail(buildQueryForCard(src.NAME, cycleStart, endExclusive), src.NAME) };
   });
+  console.log(results);
 
   const message = buildCardUsageMessage(todayStr, results);
   sendLineMessageByPush(message);
@@ -80,7 +81,7 @@ function sumMonthlyAmountFromGmail(query, cardName, startInclusive, endInclusive
   }
 
   // --- 三井住友カード：従来どおり加算（重複は基本起こりにくい前提） ---
-  if (cardName !== 'ビューカード') {
+  if (cardName === '三井住友カード') {
     for (const th of threads) {
       for (const msg of th.getMessages()) {
         const raw = msg.getPlainBody() || stripHtml(msg.getBody() || '');
@@ -173,16 +174,6 @@ function buildQueryForCard(cardName, startInclusive, endInclusive) {
   return parts.join(' ');
 }
 
-// 締め日判定（利用日がサイクル内かどうか）
-function isWithinBillingPeriod(usageDate, cardName, today) {
-  if (!usageDate) return false;
-  const start = getCycleStart(cardName, today);
-  const end = getCycleEnd(cardName, today);
-  return usageDate >= start && usageDate <= end;
-}
-
-
-
 
 // --- 差し替え: 三井住友カード 金額抽出（円/JPY、ラベル優先） ---
 function sumAmountsMitsui(text) {
@@ -241,6 +232,7 @@ function sumAmountsViewCard(text) {
 function getCardPrevMonthTotal(cardName) {
   const today = new Date();
   const src = CONFIG.GMAIL.SOURCES.find(s => s.NAME === cardName);
+  console.log(src);
 
   // 「前サイクル」の基準日を作る（今月から1ヶ月前）
   const baseDate = new Date(today.getFullYear(), today.getMonth() - 1, today.getDate());
@@ -283,23 +275,11 @@ function getCardCurrentMonthTotal(cardName) {
 function formatJPY(n) { return Number(n).toLocaleString('ja-JP'); }
 
 
-
-
-
-
-
 function classifyViewSubject(subj) {
   subj = (subj || '').trim();
   if (/確報版/.test(subj)) return 'confirmed';
   if (/速報版/.test(subj)) return 'provisional';
   return 'unknown';
-}
-
-function extractMerchant(text) {
-  // ビュー：主に「利用先」、三井住友：場合により「ご利用加盟店名」
-  const m =
-    text.match(/(?:利用先|ご利用加盟店名)\s*[：:]\s*(.+)/);
-  return m ? m[1].trim() : '';
 }
 
 function toYmd(d) {

@@ -54,74 +54,25 @@ function getSource(cardName) {
   }
   return src;
 }
+// メイン
+function sendDailyCardUsageToLINE() {
 
-/**
- * 日付ユーティリティ
- */
-function formatDate(d) {
-  return Utilities.formatDate(d, CONFIG.TZ, 'yyyy/MM/dd');
-}
+  const props = PropertiesService.getScriptProperties();
+  const todayStr = formatDate(new Date());
+  const results = CONFIG.GMAIL.SOURCES.map(src => {
+    const cycleStart = getCycleStart(src.NAME, new Date());
+    const endExclusive = new Date();
+    return { name: src.NAME, total: sumMonthlyAmountFromGmail(buildQueryForCard(src.NAME, cycleStart, endExclusive), src.NAME) };
+  });
 
-function getCycleStart(cardName, refDate) {
-  const src = getSource(cardName); // 既存の getSource を利用
-  const y = refDate.getFullYear();
-  const m = refDate.getMonth();    // 0-based
-  const d = refDate.getDate();
+  // メッセージ生成部を分離
+  const message = buildCardUsageMessage(todayStr, results);
+  sendLineMessageByPush(message);
 
-  // ref 日が開始日より前なら「前月の開始日」、それ以外は「当月の開始日」
-  return (d < src.CYCLE_START)
-    ? new Date(y, m - 1, src.CYCLE_START)
-    : new Date(y, m, src.CYCLE_START);
-}
-
-function getCycleEnd(cardName, refDate) {
-  const src = getSource(cardName);
-  const start = getCycleStart(cardName, refDate);
-
-  if (src.CYCLE_END === 0) {
-    // 月末締め → 開始月の末日
-    return new Date(start.getFullYear(), start.getMonth() + 1, 0);
-  }
-
-  // 月跨ぎかどうか：例）6開始・5締め → 跨ぐ（<=）
-  const crossesMonth = src.CYCLE_END <= src.CYCLE_START;
-  const endMonthOffset = crossesMonth ? 1 : 0;
-
-  return new Date(
-    start.getFullYear(),
-    start.getMonth() + endMonthOffset,
-    src.CYCLE_END
-  );
-}
-
-// まだなければヘルパーも（存在していれば不要）
-function addDays(d, n) {
-  const x = new Date(d.getFullYear(), d.getMonth(), d.getDate());
-  x.setDate(x.getDate() + n);
-  return x;
-}
-// 日付 d が start～end の「両端を含む」かを判定
-function inRangeInclusive(d, start, end) {
-  if (!(d instanceof Date)) return false;
-  // 時刻の影響を除くため「日付のみ」で比較
-  var x = new Date(d.getFullYear(), d.getMonth(), d.getDate());
-  return x >= start && x <= end;
-}
-
-// refDate の属する「現サイクル」の開始/終了を返す
-function getCycleRange(cardName, refDate = new Date()) {
-  const start = getCycleStart(cardName, refDate);
-  const end   = getCycleEnd(cardName, refDate);
-  return { start, end };
-}
-
-// 「現サイクル開始日の前日」を基準に、前サイクルの開始/終了を返す
-function getPrevCycleRange(cardName, refDate = new Date()) {
-  const currentStart = getCycleStart(cardName, refDate);
-  const prevRef = addDays(currentStart, -1);
-  const start = getCycleStart(cardName, prevRef);
-  const end   = getCycleEnd(cardName, prevRef);
-  return { start, end };
+  const saveObj = {};
+  for (const r of results) saveObj[r.name] = r.total;
+  props.setProperty(CONFIG.PROPS.LAST_TOTAL, JSON.stringify(saveObj));
+  props.setProperty(CONFIG.PROPS.LAST_DATE, todayStr);
 }
 
 
@@ -239,66 +190,6 @@ function sumMonthlyAmountFromGmail(query, cardName, startInclusive, endInclusive
 
 
 
-// 全角→半角のゆるやか正規化
-function normalizeDigits(s) {
-  try {
-    return s.normalize('NFKC');
-  } catch (e) {
-    return s
-      .replace(/[０-９]/g, function(ch){ return String.fromCharCode(ch.charCodeAt(0) - 0xFEE0); })
-      .replace(/[－―ー‐]/g, '-')
-      .replace(/[，]/g, ',')
-      .replace(/[：]/g, ':')
-      .replace(/[￥]/g, '¥');
-  }
-}
-
-// HTML 除去（</style> / </script> の / を \x2F で安全化）
-function stripHtml(s) {
-  return (s || '')
-    .replace(/<style[\s\S]*?<\x2Fstyle>/gi, ' ')
-    .replace(/<script[\s\S]*?<\x2Fscript>/gi, ' ')
-    .replace(/<[^>]+>/g, ' ');
-}
-
-// テキスト整形（normalize → 改行・空白の整理）
-function sanitizeText(s) {
-  return normalizeDigits(
-    (s || '')
-      .replace(/\u00A0/g, ' ')
-      .replace(/\r/g, '\n')
-      .replace(/\t/g, ' ')
-      .replace(/ +/g, ' ')
-      .replace(/\n{2,}/g, '\n')
-      .trim()
-  );
-}
-
-
-// 日付抽出（ラベル優先 → ゆるめフォールバック）
-function extractUsageDate(text, cardName) {
-  // 1) 正規化（HTML除去 → 全角→半角 → 空白整理）
-  var s = sanitizeText(stripHtml(text || ''));
-
-  // 2) ラベル優先：
-  //    「ご利用日時 / 利用日時 / ご利用日 / 利用日」の後に
-  //    2025/09/12, 2025-9-2, 2025年9月02日のいずれか
-  var reLabeled =
-    /(?:ご利用(?:日時|日)|利用(?:日時|日))\s*[：:]\s*(\d{4})(?:\/|-|年)(\d{1,2})(?:\/|-|月)(\d{1,2})(?:日)?/i;
-
-  var m = s.match(reLabeled);
-  if (m) return new Date(+m[1], +m[2] - 1, +m[3]);
-
-  // 3) フォールバック：
-  //    行内の最初の「yyyy/mm/dd | yyyy-mm-dd | yyyy年m月d日（時刻付きOK）」を拾う
-  var reLoose =
-    /(\d{4})(?:\/|-|年)(\d{1,2})(?:\/|-|月)(\d{1,2})(?:日)?(?:\s+\d{1,2}:\d{2})?/;
-
-  m = s.match(reLoose);
-  if (m) return new Date(+m[1], +m[2] - 1, +m[3]);
-
-  return null;
-}
 
 
 
@@ -417,48 +308,35 @@ function sendLineMessageByPush(message){
   if(res.getResponseCode()<200||res.getResponseCode()>=300) throw new Error(`LINE送信失敗: ${res.getContentText()}`);
 }
 
-// メイン
-function sendDailyCardUsageToLINE() {
-  const props = PropertiesService.getScriptProperties();
-  const todayStr = formatDate(new Date());
-  const results = CONFIG.GMAIL.SOURCES.map(src=>{
-    const cycleStart = getCycleStart(src.NAME, new Date());
-    const endExclusive = new Date();
-    return { name: src.NAME, total: sumMonthlyAmountFromGmail(buildQueryForCard(src.NAME, cycleStart, endExclusive), src.NAME) };
-  });
 
+
+// メッセージ生成専用関数
+function buildCardUsageMessage(todayStr, results) {
   let message = `${todayStr}時点でのカード利用額は 以下の通りです\n`;
   if (new Date().getDate() <= 5) {
     const prevMitsui = getCardPrevMonthTotal('三井住友カード');
     const prevView = getCardPrevMonthTotal('ビューカード');
-    message += `${prevMitsui.month}月の利用額：¥${formatJPY(prevMitsui.total+prevView.total)}\n`;
+    message += `${prevMitsui.month}月の利用額：¥${formatJPY(prevMitsui.total + prevView.total)}\n`;
     message += `（三井住友カード：¥${formatJPY(prevMitsui.total)}（前日より+¥${formatJPY(prevMitsui.diff)}）\n`;
     message += `ビューカード：¥${formatJPY(prevView.total)}（前日より+¥${formatJPY(prevView.diff)}））\n\n`;
     const curMitsui = getCardCurrentMonthTotal('三井住友カード');
     message += `${curMitsui.month}月の利用額：¥${formatJPY(curMitsui.total)}\n`;
     message += `（三井住友カード：¥${formatJPY(curMitsui.total)}（前日より+¥${formatJPY(curMitsui.diff)}））`;
   } else {
-    let totalAll=0,diffAll=0;
-    for(const r of results){
-    const cycleStart = getCycleStart(r.name, new Date());
-    const cycleEnd   = getCycleEnd(r.name, new Date());
-    const yesterdayTotal = getMtdYesterdayTotalCached(r.name, cycleStart, cycleEnd);
-    
-    console.info(yesterdayTotal);
-
+    let totalAll = 0, diffAll = 0;
+    for (const r of results) {
+      const cycleStart = getCycleStart(r.name, new Date());
+      const cycleEnd = getCycleEnd(r.name, new Date());
+      const yesterdayTotal = getMtdYesterdayTotalCached(r.name, cycleStart, cycleEnd);
       const diff = r.total - yesterdayTotal;
-      message += `${r.name}：¥${formatJPY(r.total)}（前日より${diff>=0?'+':'-'}¥${formatJPY(Math.abs(diff))}）\n`;
-      totalAll+=r.total; diffAll+=diff;
+      message += `${r.name}：¥${formatJPY(r.total)}（前日より${diff >= 0 ? '+' : '-'}¥${formatJPY(Math.abs(diff))}）\n`;
+      totalAll += r.total; diffAll += diff;
     }
-    message += `総合計：¥${formatJPY(totalAll)}（前日より${diffAll>=0?'+':'-'}¥${formatJPY(Math.abs(diffAll))}）`;
+    message += `総合計：¥${formatJPY(totalAll)}（前日より${diffAll >= 0 ? '+' : '-'}¥${formatJPY(Math.abs(diffAll))}）`;
   }
-  //console.info(message);
-  sendLineMessageByPush(message);
-
-  const saveObj={}; for(const r of results) saveObj[r.name]=r.total;
-  props.setProperty(CONFIG.PROPS.LAST_TOTAL, JSON.stringify(saveObj));
-  props.setProperty(CONFIG.PROPS.LAST_DATE, todayStr);
+  return message;
 }
+
 function classifyViewSubject(subj) {
   subj = (subj || '').trim();
   if (/確報版/.test(subj)) return 'confirmed';
@@ -541,21 +419,5 @@ function getMtdYesterdayTotalCached(cardName, cycleStart, cycleEnd) {
   } finally {
     try { lock.releaseLock(); } catch (e) {}
   }
-}
-
-// 'yyyyMMdd' → Date
-function parseYmd(ymd) {
-  const y = Number(ymd.substring(0, 4));
-  const m = Number(ymd.substring(4, 6)) - 1;
-  const d = Number(ymd.substring(6, 8));
-  return new Date(y, m, d);
-}
-
-// 日付（時分秒無視）の比較: a<b:-1, a=b:0, a>b:1
-function compareYmd(a, b) {
-  const ax = new Date(a.getFullYear(), a.getMonth(), a.getDate());
-  const bx = new Date(b.getFullYear(), b.getMonth(), b.getDate());
-  if (ax.getTime() === bx.getTime()) return 0;
-  return ax.getTime() < bx.getTime() ? -1 : 1;
 }
 

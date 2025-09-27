@@ -1,59 +1,4 @@
-/**
- * 設定項目
- */
-const CONFIG = {
-  GMAIL: {
-    SOURCES: [
-      { 
-        NAME: '三井住友カード',
-        FROM: 'statement@vpass.ne.jp',
-        SUBJECT: 'ご利用のお知らせ【三井住友カード】',
-        CYCLE_START: 1,   // 毎月1日開始
-        CYCLE_END: 0      // 翌月0日=月末まで
-      },
-      { 
-        NAME: 'ビューカード',
-        FROM: 'viewcard@mail.viewsnet.jp',
-        SUBJECT: '－確報版－ ビューカードご利用情報のお知らせ（本人会員利用）',
-        CYCLE_START: 6,   // 毎月6日開始
-        CYCLE_END: 5      // 翌月5日終了
-      },
-    ],
-  },
-  PROPS: {
-    LAST_TOTAL: 'lastTotalAmount',
-    LAST_DATE: 'lastSavedDate',
-    CHANNEL_ACCESS_TOKEN: 'CHANNEL_ACCESS_TOKEN',
-    LINE_TO_USER_ID: 'LINE_TO_USER_ID',
-  },
-  TZ: 'Asia/Tokyo',
-};
-// 共通キャッシュ用
-const mailCache = {};
-// CONFIG 直後に追加してください
-function getSource(cardName) {
-  if (!CONFIG || !CONFIG.GMAIL || !Array.isArray(CONFIG.GMAIL.SOURCES)) {
-    throw new Error('CONFIG.GMAIL.SOURCES が未定義です');
-  }
-  const src = CONFIG.GMAIL.SOURCES.find(s => s.NAME === cardName);
-  if (!src) throw new Error(`未定義のカード: ${cardName}`);
 
-  // 互換: CYCLE_START/CYCLE_END が無い場合は CYCLE_TYPE から補完
-  if (typeof src.CYCLE_START === 'undefined' || typeof src.CYCLE_END === 'undefined') {
-    if (src.CYCLE_TYPE === 'calendar') {
-      // 毎月1日〜月末締め
-      src.CYCLE_START = 1;
-      src.CYCLE_END = 0; // 0 = 翌月0日（=前月末）
-    } else if (src.CYCLE_TYPE === '5日締め') {
-      // 6日開始〜翌月5日終了
-      src.CYCLE_START = 6;
-      src.CYCLE_END = 5;
-    } else {
-      throw new Error(`CYCLE_START/CYCLE_END 未設定（CYCLE_TYPE から補完不可）: ${cardName}`);
-    }
-  }
-  return src;
-}
 // メイン
 function sendDailyCardUsageToLINE() {
 
@@ -65,7 +10,6 @@ function sendDailyCardUsageToLINE() {
     return { name: src.NAME, total: sumMonthlyAmountFromGmail(buildQueryForCard(src.NAME, cycleStart, endExclusive), src.NAME) };
   });
 
-  // メッセージ生成部を分離
   const message = buildCardUsageMessage(todayStr, results);
   sendLineMessageByPush(message);
 
@@ -74,43 +18,46 @@ function sendDailyCardUsageToLINE() {
   props.setProperty(CONFIG.PROPS.LAST_TOTAL, JSON.stringify(saveObj));
   props.setProperty(CONFIG.PROPS.LAST_DATE, todayStr);
 }
-
-
-function buildQueryForCard(cardName, startInclusive, endInclusive) {
-  const src = getSource(cardName);
-  if (!src) throw new Error(`未定義のカード: ${cardName}`);
-
-  const afterDate = addDays(startInclusive, -1); // 開始日前日
-  const beforeDate = addDays(endInclusive, +1);  // 終了日翌日
-
-  let subjectPart = '';
-  if (cardName === 'ビューカード') {
-    // 件名の表記ゆれに強い「トークン AND」検索
-    // 例: subject:(ビューカード ご利用情報)
-    subjectPart = 'subject:(ビューカード ご利用情報)';
-  } else if (src.SUBJECT) {
-    // 三井住友は従来の完全一致でもOK
-    subjectPart = `subject:"${src.SUBJECT}"`;
+// メッセージ生成専用関数
+function buildCardUsageMessage(todayStr, results) {
+  let message = `${todayStr}時点でのカード利用額は 以下の通りです\n`;
+  if (new Date().getDate() <= 5) {
+    const prevMitsui = getCardPrevMonthTotal('三井住友カード');
+    const prevView = getCardPrevMonthTotal('ビューカード');
+    message += `${prevMitsui.month}月の利用額：¥${formatJPY(prevMitsui.total + prevView.total)}\n`;
+    message += `（三井住友カード：¥${formatJPY(prevMitsui.total)}（前日より+¥${formatJPY(prevMitsui.diff)}）\n`;
+    message += `ビューカード：¥${formatJPY(prevView.total)}（前日より+¥${formatJPY(prevView.diff)}））\n\n`;
+    const curMitsui = getCardCurrentMonthTotal('三井住友カード');
+    message += `${curMitsui.month}月の利用額：¥${formatJPY(curMitsui.total)}\n`;
+    message += `（三井住友カード：¥${formatJPY(curMitsui.total)}（前日より+¥${formatJPY(curMitsui.diff)}））`;
+  } else {
+    let totalAll = 0, diffAll = 0;
+    for (const r of results) {
+      const cycleStart = getCycleStart(r.name, new Date());
+      const cycleEnd = getCycleEnd(r.name, new Date());
+      const yesterdayTotal = getMtdYesterdayTotalCached(r.name, cycleStart, cycleEnd);
+      const diff = r.total - yesterdayTotal;
+      message += `${r.name}：¥${formatJPY(r.total)}（前日より${diff >= 0 ? '+' : '-'}¥${formatJPY(Math.abs(diff))}）\n`;
+      totalAll += r.total; diffAll += diff;
+    }
+    message += `総合計：¥${formatJPY(totalAll)}（前日より${diffAll >= 0 ? '+' : '-'}¥${formatJPY(Math.abs(diffAll))}）`;
   }
-
-  const parts = [
-    `from:${src.FROM}`,
-    subjectPart,
-    `after:${formatDate(afterDate)}`,
-    `before:${formatDate(beforeDate)}`,
-  ].filter(Boolean);
-
-  return parts.join(' ');
+  return message;
 }
-
-// 締め日判定（利用日がサイクル内かどうか）
-function isWithinBillingPeriod(usageDate, cardName, today) {
-  if (!usageDate) return false;
-  const start = getCycleStart(cardName, today);
-  const end = getCycleEnd(cardName, today);
-  return usageDate >= start && usageDate <= end;
+// LINE送信
+function sendLineMessageByPush(message) {
+  const props = PropertiesService.getScriptProperties();
+  const token = props.getProperty(CONFIG.PROPS.CHANNEL_ACCESS_TOKEN);
+  const to = props.getProperty(CONFIG.PROPS.LINE_TO_USER_ID);
+  if (!token || !to) throw new Error('LINE情報が未設定');
+  const res = UrlFetchApp.fetch('https://api.line.me/v2/bot/message/push', {
+    method: 'post',
+    headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+    payload: JSON.stringify({ to, messages: [{ type: 'text', text: message }] }),
+    muteHttpExceptions: true
+  });
+  if (res.getResponseCode() < 200 || res.getResponseCode() >= 300) throw new Error(`LINE送信失敗: ${res.getContentText()}`);
 }
-
 // Gmail集計（キャッシュ対応）
 function sumMonthlyAmountFromGmail(query, cardName, startInclusive, endInclusive) {
   const cacheKey = `${cardName}:${query}:${startInclusive ? formatDate(startInclusive) : ''}:${endInclusive ? formatDate(endInclusive) : ''}`;
@@ -152,30 +99,42 @@ function sumMonthlyAmountFromGmail(query, cardName, startInclusive, endInclusive
 
 
   // --- ビューカード：確報優先（重複排除）※キーは「日付＋金額」に一本化 ---
+  // confirmed: 確報（またはunknown）メールの金額を格納するMap
+  // provisional: 速報メールの金額を格納するMap
+  // hardKeyは「日付+金額」で一意に紐づけ
   const confirmed = new Map();   // hardKey(yyyyMMdd\n金額) -> amt
   const provisional = new Map(); // hardKey(yyyyMMdd\n金額) -> amt
-   for (const th of threads) {
-     for (const msg of th.getMessages()) {
-       const subj = msg.getSubject() || '';
-       const typ = classifyViewSubject(subj); // confirmed / provisional / unknown
-       const raw = msg.getPlainBody() || stripHtml(msg.getBody() || '');
-       const text = sanitizeText(raw);
-       const usageDate = extractUsageDate(text, cardName);
+  for (const th of threads) {
+    for (const msg of th.getMessages()) {
+      const subj = msg.getSubject() || '';
+      // 件名から「確報/速報/unknown」を判定
+      const typ = classifyViewSubject(subj); // confirmed / provisional / unknown
+      // メール本文を整形
+      const raw = msg.getPlainBody() || stripHtml(msg.getBody() || '');
+      const text = sanitizeText(raw);
+      // 利用日を抽出（なければメール日付）
+      const usageDate = extractUsageDate(text, cardName);
       const basisDate = usageDate || msg.getDate();
-       if (!basisDate) continue;
-       if (startInclusive && endInclusive && !inRangeInclusive(basisDate, startInclusive, endInclusive)) continue;
-       const amt = sumAmountsViewCard(text);
-       if (!amt) continue;
-       const ymd = toYmd(basisDate);
+      if (!basisDate) continue; // 日付がなければスキップ
+      // サイクル範囲外は除外
+      if (startInclusive && endInclusive && !inRangeInclusive(basisDate, startInclusive, endInclusive)) continue;
+      // 金額抽出
+      const amt = sumAmountsViewCard(text);
+      if (!amt) continue; // 金額がなければスキップ
+      // 日付＋金額で一意キー生成
+      const ymd = toYmd(basisDate);
       const hardKey = `${ymd}\n${amt}`; // ← 日付＋金額のみで紐づけ
       if (typ === 'confirmed' || typ === 'unknown') {
+        // 確報またはunknownはconfirmedに格納
         confirmed.set(hardKey, amt);
       } else if (typ === 'provisional') {
-        if (confirmed.has(hardKey)) continue; // 同キー確報があれば速報は除外
-        provisional.set(hardKey, amt);        // 上書きで最新を保持
+        // 速報は、同じキーの確報があれば除外
+        if (confirmed.has(hardKey)) continue;
+        // 速報は上書きで最新を保持
+        provisional.set(hardKey, amt);
       }
-     }
-   }
+    }
+  }
   // 合計：確報は全採用
   for (const v of confirmed.values()) total += v;
   // 合計：確報に吸収されていない速報だけ採用
@@ -183,14 +142,44 @@ function sumMonthlyAmountFromGmail(query, cardName, startInclusive, endInclusive
     if (confirmed.has(k)) continue;
     total += v;
   }
-   mailCache[cacheKey] = total;
-   return total;
- }
+  mailCache[cacheKey] = total;
+  return total;
+}
+// --- 以下、Gmail集計ロジック ---
+function buildQueryForCard(cardName, startInclusive, endInclusive) {
+  const src = getSource(cardName);
+  if (!src) throw new Error(`未定義のカード: ${cardName}`);
 
+  const afterDate = addDays(startInclusive, -1); // 開始日前日
+  const beforeDate = addDays(endInclusive, +1);  // 終了日翌日
 
+  let subjectPart = '';
+  if (cardName === 'ビューカード') {
+    // 件名の表記ゆれに強い「トークン AND」検索
+    // 例: subject:(ビューカード ご利用情報)
+    subjectPart = 'subject:(ビューカード ご利用情報)';
+  } else if (src.SUBJECT) {
+    // 三井住友は従来の完全一致でもOK
+    subjectPart = `subject:"${src.SUBJECT}"`;
+  }
 
+  const parts = [
+    `from:${src.FROM}`,
+    subjectPart,
+    `after:${formatDate(afterDate)}`,
+    `before:${formatDate(beforeDate)}`,
+  ].filter(Boolean);
 
+  return parts.join(' ');
+}
 
+// 締め日判定（利用日がサイクル内かどうか）
+function isWithinBillingPeriod(usageDate, cardName, today) {
+  if (!usageDate) return false;
+  const start = getCycleStart(cardName, today);
+  const end = getCycleEnd(cardName, today);
+  return usageDate >= start && usageDate <= end;
+}
 
 
 
@@ -261,8 +250,8 @@ function getCardPrevMonthTotal(cardName) {
   const total = sumMonthlyAmountFromGmail(buildQueryForCard(cardName, start, end), cardName);
 
 
-// 昨日まで（サイクル内）をプロパティで増分キャッシュ
-const yesterdayTotal = getMtdYesterdayTotalCached(cardName, start, end);
+  // 昨日まで（サイクル内）をプロパティで増分キャッシュ
+  const yesterdayTotal = getMtdYesterdayTotalCached(cardName, start, end);
 
 
   // 月ラベルは終了日の月を採用
@@ -280,8 +269,8 @@ function getCardCurrentMonthTotal(cardName) {
 
   const total = sumMonthlyAmountFromGmail(buildQueryForCard(cardName, start, end), cardName);
 
-// 昨日まで（サイクル内）をプロパティで増分キャッシュ
-const yesterdayTotal = getMtdYesterdayTotalCached(cardName, start, end);
+  // 昨日まで（サイクル内）をプロパティで増分キャッシュ
+  const yesterdayTotal = getMtdYesterdayTotalCached(cardName, start, end);
 
 
   // 月ラベルは開始日の月を採用（「今サイクル」として扱うため）
@@ -291,51 +280,13 @@ const yesterdayTotal = getMtdYesterdayTotalCached(cardName, start, end);
 }
 
 // 文字列整形
-function formatJPY(n){ return Number(n).toLocaleString('ja-JP'); }
-
-// LINE送信
-function sendLineMessageByPush(message){
-  const props = PropertiesService.getScriptProperties();
-  const token = props.getProperty(CONFIG.PROPS.CHANNEL_ACCESS_TOKEN);
-  const to = props.getProperty(CONFIG.PROPS.LINE_TO_USER_ID);
-  if(!token||!to) throw new Error('LINE情報が未設定');
-  const res = UrlFetchApp.fetch('https://api.line.me/v2/bot/message/push',{
-    method:'post',
-    headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},
-    payload:JSON.stringify({to,messages:[{type:'text',text:message}]}),
-    muteHttpExceptions:true
-  });
-  if(res.getResponseCode()<200||res.getResponseCode()>=300) throw new Error(`LINE送信失敗: ${res.getContentText()}`);
-}
+function formatJPY(n) { return Number(n).toLocaleString('ja-JP'); }
 
 
 
-// メッセージ生成専用関数
-function buildCardUsageMessage(todayStr, results) {
-  let message = `${todayStr}時点でのカード利用額は 以下の通りです\n`;
-  if (new Date().getDate() <= 5) {
-    const prevMitsui = getCardPrevMonthTotal('三井住友カード');
-    const prevView = getCardPrevMonthTotal('ビューカード');
-    message += `${prevMitsui.month}月の利用額：¥${formatJPY(prevMitsui.total + prevView.total)}\n`;
-    message += `（三井住友カード：¥${formatJPY(prevMitsui.total)}（前日より+¥${formatJPY(prevMitsui.diff)}）\n`;
-    message += `ビューカード：¥${formatJPY(prevView.total)}（前日より+¥${formatJPY(prevView.diff)}））\n\n`;
-    const curMitsui = getCardCurrentMonthTotal('三井住友カード');
-    message += `${curMitsui.month}月の利用額：¥${formatJPY(curMitsui.total)}\n`;
-    message += `（三井住友カード：¥${formatJPY(curMitsui.total)}（前日より+¥${formatJPY(curMitsui.diff)}））`;
-  } else {
-    let totalAll = 0, diffAll = 0;
-    for (const r of results) {
-      const cycleStart = getCycleStart(r.name, new Date());
-      const cycleEnd = getCycleEnd(r.name, new Date());
-      const yesterdayTotal = getMtdYesterdayTotalCached(r.name, cycleStart, cycleEnd);
-      const diff = r.total - yesterdayTotal;
-      message += `${r.name}：¥${formatJPY(r.total)}（前日より${diff >= 0 ? '+' : '-'}¥${formatJPY(Math.abs(diff))}）\n`;
-      totalAll += r.total; diffAll += diff;
-    }
-    message += `総合計：¥${formatJPY(totalAll)}（前日より${diffAll >= 0 ? '+' : '-'}¥${formatJPY(Math.abs(diffAll))}）`;
-  }
-  return message;
-}
+
+
+
 
 function classifyViewSubject(subj) {
   subj = (subj || '').trim();
@@ -376,10 +327,10 @@ function getMtdYesterdayTotalCached(cardName, cycleStart, cycleEnd) {
     }
 
     const base = `mtd:${cardName}:${toYmd(cycleStart)}-${toYmd(cycleEnd)}`;
-    const lastDateKey  = `${base}:lastDate`;
+    const lastDateKey = `${base}:lastDate`;
     const lastTotalKey = `${base}:lastTotal`;
 
-    const lastDateStr  = props.getProperty(lastDateKey);
+    const lastDateStr = props.getProperty(lastDateKey);
     const lastTotalStr = props.getProperty(lastTotalKey);
 
     // 初回：yEnd までをフル集計して保存
@@ -390,7 +341,7 @@ function getMtdYesterdayTotalCached(cardName, cycleStart, cycleEnd) {
         cycleStart,
         yEnd
       );
-      props.setProperty(lastDateKey,  toYmd(yEnd));
+      props.setProperty(lastDateKey, toYmd(yEnd));
       props.setProperty(lastTotalKey, String(total));
       return total;
     }
@@ -413,11 +364,11 @@ function getMtdYesterdayTotalCached(cardName, cycleStart, cycleEnd) {
     );
     total += delta;
 
-    props.setProperty(lastDateKey,  toYmd(yEnd));
+    props.setProperty(lastDateKey, toYmd(yEnd));
     props.setProperty(lastTotalKey, String(total));
     return total;
   } finally {
-    try { lock.releaseLock(); } catch (e) {}
+    try { lock.releaseLock(); } catch (e) { }
   }
 }
 

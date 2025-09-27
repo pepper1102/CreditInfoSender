@@ -1,4 +1,61 @@
 /**
+ * 設定項目
+ */
+const CONFIG = {
+  GMAIL: {
+    SOURCES: [
+      {
+        NAME: '三井住友カード',
+        FROM: 'statement@vpass.ne.jp',
+        SUBJECT: 'ご利用のお知らせ【三井住友カード】',
+        CYCLE_START: 1,   // 毎月1日開始
+        CYCLE_END: 0      // 翌月0日=月末まで
+      },
+      {
+        NAME: 'ビューカード',
+        FROM: 'viewcard@mail.viewsnet.jp',
+        SUBJECT: '－確報版－ ビューカードご利用情報のお知らせ（本人会員利用）',
+        CYCLE_START: 6,   // 毎月6日開始
+        CYCLE_END: 5      // 翌月5日終了
+      },
+    ],
+  },
+  PROPS: {
+    LAST_TOTAL: 'lastTotalAmount',
+    LAST_DATE: 'lastSavedDate',
+    CHANNEL_ACCESS_TOKEN: 'CHANNEL_ACCESS_TOKEN',
+    LINE_TO_USER_ID: 'LINE_TO_USER_ID',
+  },
+  TZ: 'Asia/Tokyo',
+};
+// 共通キャッシュ用
+const mailCache = {};
+// CONFIG 直後に追加してください
+function getSource(cardName) {
+  if (!CONFIG || !CONFIG.GMAIL || !Array.isArray(CONFIG.GMAIL.SOURCES)) {
+    throw new Error('CONFIG.GMAIL.SOURCES が未定義です');
+  }
+  const src = CONFIG.GMAIL.SOURCES.find(s => s.NAME === cardName);
+  if (!src) throw new Error(`未定義のカード: ${cardName}`);
+
+  // 互換: CYCLE_START/CYCLE_END が無い場合は CYCLE_TYPE から補完
+  if (typeof src.CYCLE_START === 'undefined' || typeof src.CYCLE_END === 'undefined') {
+    if (src.CYCLE_TYPE === 'calendar') {
+      // 毎月1日〜月末締め
+      src.CYCLE_START = 1;
+      src.CYCLE_END = 0; // 0 = 翌月0日（=前月末）
+    } else if (src.CYCLE_TYPE === '5日締め') {
+      // 6日開始〜翌月5日終了
+      src.CYCLE_START = 6;
+      src.CYCLE_END = 5;
+    } else {
+      throw new Error(`CYCLE_START/CYCLE_END 未設定（CYCLE_TYPE から補完不可）: ${cardName}`);
+    }
+  }
+  return src;
+}
+
+/**
  * 日付ユーティリティ
  */
 function formatDate(d) {

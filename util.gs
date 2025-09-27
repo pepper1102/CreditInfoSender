@@ -30,7 +30,12 @@ const CONFIG = {
 };
 // 共通キャッシュ用
 const mailCache = {};
-// CONFIG 直後に追加してください
+/**
+ * カード名から設定情報（SOURCES配列の要素）を取得する
+ * @param {string} cardName - カード名
+ * @returns {Object} カード設定情報
+ * @throws {Error} 未定義カードや設定不足の場合
+ */
 function getSource(cardName) {
   if (!CONFIG || !CONFIG.GMAIL || !Array.isArray(CONFIG.GMAIL.SOURCES)) {
     throw new Error('CONFIG.GMAIL.SOURCES が未定義です');
@@ -56,7 +61,9 @@ function getSource(cardName) {
 }
 
 /**
- * 日付ユーティリティ
+ * 日付を指定フォーマット（yyyy/MM/dd）で文字列化
+ * @param {Date} d - 日付オブジェクト
+ * @returns {string} フォーマット済み日付文字列
  */
 function formatDate(d) {
   return Utilities.formatDate(d, CONFIG.TZ, 'yyyy/MM/dd');
@@ -68,10 +75,10 @@ function getCycleStart(cardName, refDate) {
   const m = refDate.getMonth();    // 0-based
   const d = refDate.getDate();
 
-  // ref 日が開始日より前なら「前月の開始日」、それ以外は「当月の開始日」
-  return (d < src.CYCLE_START)
-    ? new Date(y, m - 1, src.CYCLE_START)
-    : new Date(y, m, src.CYCLE_START);
+    // ref 日が開始日より前なら「前月の開始日」、それ以外は「当月の開始日」
+    return (d < src.CYCLE_START)
+      ? new Date(y, m - 1, src.CYCLE_START)
+      : new Date(y, m, src.CYCLE_START);
 }
 
 function getCycleEnd(cardName, refDate) {
@@ -94,13 +101,24 @@ function getCycleEnd(cardName, refDate) {
   );
 }
 
-// まだなければヘルパーも（存在していれば不要）
+/**
+ * 指定日付に日数を加算（または減算）した新しいDateを返す
+ * @param {Date} d - 基準日
+ * @param {number} n - 加算/減算する日数
+ * @returns {Date} 加算後の日付
+ */
 function addDays(d, n) {
   const x = new Date(d.getFullYear(), d.getMonth(), d.getDate());
   x.setDate(x.getDate() + n);
   return x;
 }
-// 日付 d が start～end の「両端を含む」かを判定
+/**
+ * 日付dがstart～endの範囲（両端含む）に入っているか判定
+ * @param {Date} d - 判定する日付
+ * @param {Date} start - 範囲開始
+ * @param {Date} end - 範囲終了
+ * @returns {boolean} 範囲内ならtrue
+ */
 function inRangeInclusive(d, start, end) {
   if (!(d instanceof Date)) return false;
   // 時刻の影響を除くため「日付のみ」で比較
@@ -108,14 +126,24 @@ function inRangeInclusive(d, start, end) {
   return x >= start && x <= end;
 }
 
-// refDate の属する「現サイクル」の開始/終了を返す
+/**
+ * 指定日付が属するサイクルの開始・終了日を返す
+ * @param {string} cardName - カード名
+ * @param {Date} [refDate=new Date()] - 基準日
+ * @returns {{start: Date, end: Date}} サイクル範囲
+ */
 function getCycleRange(cardName, refDate = new Date()) {
   const start = getCycleStart(cardName, refDate);
   const end   = getCycleEnd(cardName, refDate);
   return { start, end };
 }
 
-// 「現サイクル開始日の前日」を基準に、前サイクルの開始/終了を返す
+/**
+ * 前サイクルの開始・終了日を返す
+ * @param {string} cardName - カード名
+ * @param {Date} [refDate=new Date()] - 基準日
+ * @returns {{start: Date, end: Date}} 前サイクル範囲
+ */
 function getPrevCycleRange(cardName, refDate = new Date()) {
   const currentStart = getCycleStart(cardName, refDate);
   const prevRef = addDays(currentStart, -1);
@@ -124,7 +152,11 @@ function getPrevCycleRange(cardName, refDate = new Date()) {
   return { start, end };
 }
 
-// 全角→半角のゆるやか正規化
+/**
+ * 全角数字や記号を半角に変換する（ゆるやか正規化）
+ * @param {string} s - 入力文字列
+ * @returns {string} 正規化済み文字列
+ */
 function normalizeDigits(s) {
   try {
     return s.normalize('NFKC');
@@ -138,7 +170,11 @@ function normalizeDigits(s) {
   }
 }
 
-// HTML 除去（</style> / </script> の / を \x2F で安全化）
+/**
+ * HTMLタグを除去し、style/scriptタグも安全化
+ * @param {string} s - 入力HTML文字列
+ * @returns {string} タグ除去済み文字列
+ */
 function stripHtml(s) {
   return (s || '')
     .replace(/<style[\s\S]*?<\x2Fstyle>/gi, ' ')
@@ -146,7 +182,11 @@ function stripHtml(s) {
     .replace(/<[^>]+>/g, ' ');
 }
 
-// テキスト整形（normalize → 改行・空白の整理）
+/**
+ * テキストを正規化し、改行・空白を整理
+ * @param {string} s - 入力文字列
+ * @returns {string} 整形済み文字列
+ */
 function sanitizeText(s) {
   return normalizeDigits(
     (s || '')
@@ -160,7 +200,12 @@ function sanitizeText(s) {
 }
 
 
-// 日付抽出（ラベル優先 → ゆるめフォールバック）
+/**
+ * メール本文から利用日を抽出（ラベル優先・フォールバックあり）
+ * @param {string} text - メール本文
+ * @param {string} cardName - カード名
+ * @returns {Date|null} 抽出した日付（失敗時はnull）
+ */
 function extractUsageDate(text, cardName) {
   // 1) 正規化（HTML除去 → 全角→半角 → 空白整理）
   var s = sanitizeText(stripHtml(text || ''));
@@ -184,7 +229,11 @@ function extractUsageDate(text, cardName) {
 
   return null;
 }
-// 'yyyyMMdd' → Date
+/**
+ * yyyyMMdd形式の文字列をDate型に変換
+ * @param {string} ymd - 日付文字列（例: 20250927）
+ * @returns {Date} Dateオブジェクト
+ */
 function parseYmd(ymd) {
   const y = Number(ymd.substring(0, 4));
   const m = Number(ymd.substring(4, 6)) - 1;
@@ -192,7 +241,12 @@ function parseYmd(ymd) {
   return new Date(y, m, d);
 }
 
-// 日付（時分秒無視）の比較: a<b:-1, a=b:0, a>b:1
+/**
+ * 日付（時分秒無視）の大小比較
+ * @param {Date} a - 比較対象A
+ * @param {Date} b - 比較対象B
+ * @returns {number} a<b:-1, a=b:0, a>b:1
+ */
 function compareYmd(a, b) {
   const ax = new Date(a.getFullYear(), a.getMonth(), a.getDate());
   const bx = new Date(b.getFullYear(), b.getMonth(), b.getDate());

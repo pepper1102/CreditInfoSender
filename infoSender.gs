@@ -1,5 +1,8 @@
 
-// メイン
+/**
+ * カード利用額を集計し、LINEへ送信・保存するメイン関数
+ * @returns {void}
+ */
 function sendDailyCardUsageToLINE() {
 
   const props = PropertiesService.getScriptProperties();
@@ -19,7 +22,12 @@ function sendDailyCardUsageToLINE() {
   props.setProperty(CONFIG.PROPS.LAST_TOTAL, JSON.stringify(saveObj));
   props.setProperty(CONFIG.PROPS.LAST_DATE, todayStr);
 }
-// メッセージ生成専用関数
+/**
+ * カード利用額の集計結果からLINE送信用メッセージを生成
+ * @param {string} todayStr - 日付文字列
+ * @param {Array<{name:string,total:number}>} results - 集計結果配列
+ * @returns {string} 送信メッセージ
+ */
 function buildCardUsageMessage(todayStr, results) {
   let message = `${todayStr}時点でのカード利用額は 以下の通りです\n`;
   if (new Date().getDate() <= 5) {
@@ -45,7 +53,12 @@ function buildCardUsageMessage(todayStr, results) {
   }
   return message;
 }
-// LINE送信
+/**
+ * LINEへメッセージをPush送信する
+ * @param {string} message - 送信するテキスト
+ * @throws {Error} LINE情報未設定・送信失敗時
+ * @returns {void}
+ */
 function sendLineMessageByPush(message) {
   const props = PropertiesService.getScriptProperties();
   const token = props.getProperty(CONFIG.PROPS.CHANNEL_ACCESS_TOKEN);
@@ -59,7 +72,14 @@ function sendLineMessageByPush(message) {
   });
   if (res.getResponseCode() < 200 || res.getResponseCode() >= 300) throw new Error(`LINE送信失敗: ${res.getContentText()}`);
 }
-// Gmail集計（キャッシュ対応）
+/**
+ * Gmailからカード利用額を集計（キャッシュ・ビューカード重複排除対応）
+ * @param {string} query - Gmail検索クエリ
+ * @param {string} cardName - カード名
+ * @param {Date} startInclusive - 集計開始日
+ * @param {Date} endInclusive - 集計終了日
+ * @returns {number} 利用額合計
+ */
 function sumMonthlyAmountFromGmail(query, cardName, startInclusive, endInclusive) {
   const cacheKey = `${cardName}:${query}:${startInclusive ? formatDate(startInclusive) : ''}:${endInclusive ? formatDate(endInclusive) : ''}`;
   if (mailCache[cacheKey] !== undefined) return mailCache[cacheKey];
@@ -146,7 +166,13 @@ function sumMonthlyAmountFromGmail(query, cardName, startInclusive, endInclusive
   mailCache[cacheKey] = total;
   return total;
 }
-// --- 以下、Gmail集計ロジック ---
+/**
+ * カード名・期間からGmail検索クエリを生成
+ * @param {string} cardName - カード名
+ * @param {Date} startInclusive - 開始日
+ * @param {Date} endInclusive - 終了日
+ * @returns {string} Gmail検索クエリ
+ */
 function buildQueryForCard(cardName, startInclusive, endInclusive) {
   const src = getSource(cardName);
   if (!src) throw new Error(`未定義のカード: ${cardName}`);
@@ -175,7 +201,11 @@ function buildQueryForCard(cardName, startInclusive, endInclusive) {
 }
 
 
-// --- 差し替え: 三井住友カード 金額抽出（円/JPY、ラベル優先） ---
+/**
+ * 三井住友カードのメール本文から金額を抽出
+ * @param {string} text - メール本文
+ * @returns {number} 抽出した金額合計
+ */
 function sumAmountsMitsui(text) {
   if (!text) return 0;
   let sum = 0, m;
@@ -204,7 +234,11 @@ function sumAmountsMitsui(text) {
   return sum;
 }
 
-// --- 差し替え: ビューカード 金額抽出（「税込」などカッコ書き対応） ---
+/**
+ * ビューカードのメール本文から金額を抽出（カッコ書き対応）
+ * @param {string} text - メール本文
+ * @returns {number} 抽出した金額合計
+ */
 function sumAmountsViewCard(text) {
   if (!text) return 0;
   let sum = 0, m;
@@ -228,7 +262,11 @@ function sumAmountsViewCard(text) {
 }
 
 
-// 前月サイクルの合計
+/**
+ * 前月サイクルの利用額合計・差分・月ラベルを取得
+ * @param {string} cardName - カード名
+ * @returns {{total:number, diff:number, month:number}} 集計結果
+ */
 function getCardPrevMonthTotal(cardName) {
   const today = new Date();
   const src = CONFIG.GMAIL.SOURCES.find(s => s.NAME === cardName);
@@ -252,7 +290,11 @@ function getCardPrevMonthTotal(cardName) {
   return { total, diff: total - yesterdayTotal, month: monthLabel };
 }
 
-// 当月サイクルの合計
+/**
+ * 当月サイクルの利用額合計・差分・月ラベルを取得
+ * @param {string} cardName - カード名
+ * @returns {{total:number, diff:number, month:number}} 集計結果
+ */
 function getCardCurrentMonthTotal(cardName) {
   const today = new Date();
 
@@ -271,10 +313,19 @@ function getCardCurrentMonthTotal(cardName) {
   return { total, diff: total - yesterdayTotal, month: monthLabel };
 }
 
-// 文字列整形
+/**
+ * 金額を日本語カンマ区切り文字列に変換
+ * @param {number} n - 金額
+ * @returns {string} 整形済み文字列
+ */
 function formatJPY(n) { return Number(n).toLocaleString('ja-JP'); }
 
 
+/**
+ * ビューカードメール件名から「確報/速報/unknown」を判定
+ * @param {string} subj - 件名
+ * @returns {string} 判定結果（confirmed/provisional/unknown）
+ */
 function classifyViewSubject(subj) {
   subj = (subj || '').trim();
   if (/確報版/.test(subj)) return 'confirmed';
@@ -282,13 +333,21 @@ function classifyViewSubject(subj) {
   return 'unknown';
 }
 
+/**
+ * Date型をyyyyMMdd形式の文字列に変換
+ * @param {Date} d - 日付
+ * @returns {string} 変換後文字列
+ */
 function toYmd(d) {
   return Utilities.formatDate(new Date(d.getFullYear(), d.getMonth(), d.getDate()), CONFIG.TZ, 'yyyyMMdd');
 }
 
 /**
- * MTD（サイクル開始～前日(yEnd)まで）の合計を PropertiesService で増分キャッシュ。
- * 前回保存した「前日」から新しい「前日」までの差分だけを Gmail から再集計する。
+ * サイクル開始～前日までの合計をPropertiesServiceで増分キャッシュ
+ * @param {string} cardName - カード名
+ * @param {Date} cycleStart - サイクル開始日
+ * @param {Date} cycleEnd - サイクル終了日
+ * @returns {number} 合計金額
  */
 function getMtdYesterdayTotalCached(cardName, cycleStart, cycleEnd) {
   const props = PropertiesService.getScriptProperties();

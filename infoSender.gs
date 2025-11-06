@@ -9,13 +9,41 @@ function sendDailyCardUsageToLINE() {
   const todayStr = formatDate(new Date());
   const results = CONFIG.GMAIL.SOURCES.map(src => {
     const cycleStart = getCycleStart(src.NAME, new Date());
+    const cycleEnd = getCycleEnd(src.NAME, new Date());
     const endExclusive = new Date();
-    return { name: src.NAME, total: sumMonthlyAmountFromGmail(buildQueryForCard(src.NAME, cycleStart, endExclusive), src.NAME) };
+    const query = buildQueryForCard(src.NAME, cycleStart, endExclusive);
+    const total = sumMonthlyAmountFromGmail(query, src.NAME, cycleStart, endExclusive);
+    console.log(`集計結果 - ${src.NAME}:`, {
+      cycleStart: toYmd(cycleStart),
+      cycleEnd: toYmd(cycleEnd),
+      endExclusive: toYmd(endExclusive),
+      total
+    });
+    return { name: src.NAME, total, cycleStart, cycleEnd };
   });
-  //console.log(results);
 
   const message = buildCardUsageMessage(todayStr, results);
   sendLineMessageByPush(message);
+
+  // 結果をプロパティに保存（カードごとに意味が分かる形で保存）
+  const saveObj = {};
+  for (const r of results) {
+    saveObj[r.name] = { total: r.total, cycleStart: toYmd(r.cycleStart), cycleEnd: toYmd(r.cycleEnd) };
+  }
+  console.log('Saving to properties:', {
+    LAST_TOTAL: saveObj,
+    LAST_DATE: todayStr,
+    LAST_TOTAL_KEY: CONFIG.PROPS.LAST_TOTAL,
+    LAST_DATE_KEY: CONFIG.PROPS.LAST_DATE
+  });
+  props.setProperty(CONFIG.PROPS.LAST_TOTAL, JSON.stringify(saveObj));
+  props.setProperty(CONFIG.PROPS.LAST_DATE, todayStr);
+  
+  // 保存後の確認
+  console.log('Saved values:', {
+    LAST_TOTAL: props.getProperty(CONFIG.PROPS.LAST_TOTAL),
+    LAST_DATE: props.getProperty(CONFIG.PROPS.LAST_DATE)
+  });
 
 }
 /**
@@ -40,10 +68,21 @@ function buildCardUsageMessage(todayStr, results) {
     for (const r of results) {
       const cycleStart = getCycleStart(r.name, new Date());
       const cycleEnd = getCycleEnd(r.name, new Date());
+      try {
       const yesterdayTotal = getMtdYesterdayTotalCached(r.name, cycleStart, cycleEnd);
       const diff = r.total - yesterdayTotal;
-      message += `${r.name}：¥${formatJPY(r.total)}（前日より${diff >= 0 ? '+' : '-'}¥${formatJPY(Math.abs(diff))}）\n`;
+      if (yesterdayTotal === 0 && toYmd(cycleStart) === formatDate(new Date())) {
+        message += `${r.name}：¥${formatJPY(r.total)}（今日からの新サイクル）\n`;
+      } else {
+        message += `${r.name}：¥${formatJPY(r.total)}（前日より${diff >= 0 ? '+' : '-'}¥${formatJPY(Math.abs(diff))}）\n`;
+      }
       totalAll += r.total; diffAll += diff;
+      } catch (e) {
+        console.error(`Error processing ${r.name}:`, e);
+        message += `${r.name}：¥${formatJPY(r.total)}（前日比較不可）\n`;
+        totalAll += r.total;
+      }
+
     }
     message += `総合計：¥${formatJPY(totalAll)}（前日より${diffAll >= 0 ? '+' : '-'}¥${formatJPY(Math.abs(diffAll))}）`;
   }
@@ -104,7 +143,14 @@ function sumMonthlyAmountFromGmail(query, cardName, startInclusive, endInclusive
         const text = sanitizeText(raw);
         const usageDate = extractUsageDate(text, cardName);
         const basisDate = usageDate || msg.getDate();
-        if (startInclusive && endInclusive && !inRangeInclusive(basisDate, startInclusive, endInclusive)) continue;
+        if (startInclusive && endInclusive && !inRangeInclusive(basisDate, startInclusive, endInclusive)) {
+          console.log(`${cardName}の利用を除外:`, {
+            利用日: toYmd(basisDate),
+            サイクル開始: toYmd(startInclusive),
+            サイクル終了: toYmd(endInclusive)
+          });
+          continue;
+        }
         //console.log(text)
         const delta = sumAmountsMitsui(text);
         total += delta;
@@ -173,8 +219,9 @@ function buildQueryForCard(cardName, startInclusive, endInclusive) {
   const src = getSource(cardName);
   if (!src) throw new Error(`未定義のカード: ${cardName}`);
 
-  const afterDate = addDays(startInclusive, -1); // 開始日前日
-  const beforeDate = addDays(endInclusive, +1);  // 終了日翌日
+  // メール受信日のマージンを広げる（利用日とメール受信日のずれを考慮）
+  const afterDate = addDays(startInclusive, -2); // 開始日の2日前
+  const beforeDate = addDays(endInclusive, +2);  // 終了日の2日後
 
   let subjectPart = '';
   if (cardName === 'ビューカード') {
@@ -356,17 +403,45 @@ function getMtdYesterdayTotalCached(cardName, cycleStart, cycleEnd) {
     // 前日とサイクル終了のうち、早い方を yEnd とする（サイクル外へ出ないように）
     const yEnd = (yesterday < cycleEnd) ? yesterday : cycleEnd;
 
-    // 前日がサイクル開始より前なら 0 固定
-    if (compareYmd(yEnd, cycleStart) < 0) {
-      return 0;
-    }
-
-    const base = `mtd:${cardName}:${toYmd(cycleStart)}-${toYmd(cycleEnd)}`;
+    // 正規化キー：カードごとにサイクルを YYYYMM で一意にする（cycleStart の年月を使用）
+    const cycleLabel = `${cycleStart.getFullYear()}${String(cycleStart.getMonth() + 1).padStart(2, '0')}`;
+    const base = `mtd:${cardName}:${cycleLabel}`;
     const lastDateKey = `${base}:lastDate`;
     const lastTotalKey = `${base}:lastTotal`;
 
+    // 前日がサイクル開始より前の場合
+    if (compareYmd(yEnd, cycleStart) < 0) {
+      console.log(`${cardName}: サイクル開始日(${toYmd(cycleStart)})のため、前日比較なし`);
+      // サイクル開始日の場合は、現在の値を初期値として保存
+      if (compareYmd(new Date(), cycleStart) === 0) {
+        const today = new Date();
+        const query = buildQueryForCard(cardName, cycleStart, today);
+        console.log(`サイクル開始日の初期値を集計 - ${cardName}:`, {
+          query,
+          start: toYmd(cycleStart),
+          end: toYmd(today)
+        });
+        const currentTotal = sumMonthlyAmountFromGmail(query, cardName, cycleStart, today);
+        console.log(`サイクル開始日の集計結果 - ${cardName}:`, currentTotal);
+        props.setProperty(lastDateKey, toYmd(new Date()));
+        props.setProperty(lastTotalKey, String(currentTotal));
+      }
+      return 0;
+    }
+
+
+
     const lastDateStr = props.getProperty(lastDateKey);
     const lastTotalStr = props.getProperty(lastTotalKey);
+
+    // 許容する保存キー（カードごとに当月と前月のみ保持）
+    const curCycleStart = getCycleStart(cardName, new Date());
+    const prevCycleStart = new Date(curCycleStart.getFullYear(), curCycleStart.getMonth() - 1, curCycleStart.getDate());
+    const allowedLabels = [
+      `${curCycleStart.getFullYear()}${String(curCycleStart.getMonth() + 1).padStart(2, '0')}`,
+      `${prevCycleStart.getFullYear()}${String(prevCycleStart.getMonth() + 1).padStart(2, '0')}`
+    ];
+    const allowedPrefixes = allowedLabels.map(l => `mtd:${cardName}:${l}`);
 
     // 初回：yEnd までをフル集計して保存
     if (!lastDateStr || !lastTotalStr) {
@@ -378,6 +453,15 @@ function getMtdYesterdayTotalCached(cardName, cycleStart, cycleEnd) {
       );
       props.setProperty(lastDateKey, toYmd(yEnd));
       props.setProperty(lastTotalKey, String(total));
+
+      // クリーンアップ：当カードの mtd:... は当月・前月のみ残す
+      const all = props.getProperties();
+      for (const k of Object.keys(all)) {
+        if (k.startsWith(`mtd:${cardName}:`) && !allowedPrefixes.some(p => k.startsWith(p))) {
+          props.deleteProperty(k);
+        }
+      }
+
       return total;
     }
 
@@ -401,10 +485,15 @@ function getMtdYesterdayTotalCached(cardName, cycleStart, cycleEnd) {
 
     props.setProperty(lastDateKey, toYmd(yEnd));
     props.setProperty(lastTotalKey, String(total));
-    const saveObj = {};
-    for (const r of results) saveObj[r.name] = r.total;
-    props.setProperty(CONFIG.PROPS.LAST_TOTAL, JSON.stringify(saveObj));
-    props.setProperty(CONFIG.PROPS.LAST_DATE, todayStr);
+
+    // クリーンアップ：当カードの mtd:... は当月・前月のみ残す
+    const all2 = props.getProperties();
+    for (const k of Object.keys(all2)) {
+      if (k.startsWith(`mtd:${cardName}:`) && !allowedPrefixes.some(p => k.startsWith(p))) {
+        props.deleteProperty(k);
+      }
+    }
+
     return total;
   } finally {
     try { lock.releaseLock(); } catch (e) { }

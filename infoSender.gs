@@ -4,6 +4,21 @@
  * @returns {void}
  */
 function sendDailyCardUsageToLINE() {
+  try {
+    _sendDailyCardUsageToLINEImpl();
+  } catch (error) {
+    logError('集計処理でエラーが発生しました', error);
+    sendErrorNotificationToLine(error);
+    throw error; // エラーを再スロー（トリガー実行ログに記録）
+  }
+}
+
+/**
+ * カード利用額を集計し、LINEへ送信・保存する実装関数
+ * @private
+ * @returns {void}
+ */
+function _sendDailyCardUsageToLINEImpl() {
 
   const props = PropertiesService.getScriptProperties();
   const todayStr = formatDate(new Date());
@@ -13,12 +28,7 @@ function sendDailyCardUsageToLINE() {
     const endExclusive = new Date();
     const query = buildQueryForCard(src.NAME, cycleStart, endExclusive);
     const total = sumMonthlyAmountFromGmail(query, src.NAME, cycleStart, endExclusive);
-    console.log(`集計結果 - ${src.NAME}:`, {
-      cycleStart: toYmd(cycleStart),
-      cycleEnd: toYmd(cycleEnd),
-      endExclusive: toYmd(endExclusive),
-      total
-    });
+    logCardSummary(src.NAME, cycleStart, cycleEnd, endExclusive, total);
     return { name: src.NAME, total, cycleStart, cycleEnd };
   });
 
@@ -30,21 +40,25 @@ function sendDailyCardUsageToLINE() {
   for (const r of results) {
     saveObj[r.name] = { total: r.total, cycleStart: toYmd(r.cycleStart), cycleEnd: toYmd(r.cycleEnd) };
   }
-  console.log('Saving to properties:', {
-    LAST_TOTAL: saveObj,
-    LAST_DATE: todayStr,
-    LAST_TOTAL_KEY: CONFIG.PROPS.LAST_TOTAL,
-    LAST_DATE_KEY: CONFIG.PROPS.LAST_DATE
-  });
   props.setProperty(CONFIG.PROPS.LAST_TOTAL, JSON.stringify(saveObj));
   props.setProperty(CONFIG.PROPS.LAST_DATE, todayStr);
-  
-  // 保存後の確認
-  console.log('Saved values:', {
-    LAST_TOTAL: props.getProperty(CONFIG.PROPS.LAST_TOTAL),
-    LAST_DATE: props.getProperty(CONFIG.PROPS.LAST_DATE)
-  });
 
+  logSaveConfirmation(saveObj, todayStr);
+
+}
+
+/**
+ * エラー発生時にLINEへ通知を送信
+ * @param {Error} error - 発生したエラー
+ * @returns {void}
+ */
+function sendErrorNotificationToLine(error) {
+  try {
+    const errorMessage = `⚠️ エラーが発生しました\n\n${error.message || error.toString()}`;
+    sendLineMessageByPush(errorMessage);
+  } catch (notificationError) {
+    logError('エラー通知の送信も失敗しました', notificationError);
+  }
 }
 /**
  * カード利用額の集計結果からLINE送信用メッセージを生成
@@ -54,7 +68,7 @@ function sendDailyCardUsageToLINE() {
  */
 function buildCardUsageMessage(todayStr, results) {
   let message = `${todayStr}時点でのカード利用額は 以下の通りです\n`;
-  if (new Date().getDate() <= 5) {
+  if (new Date().getDate() <= CONFIG.MESSAGE.EARLY_MONTH_THRESHOLD) {
     const prevMitsui = getCardPrevMonthTotal('三井住友カード');
     const prevView = getCardPrevMonthTotal('ビューカード');
     message += `${prevMitsui.month}月の利用額：¥${formatJPY(prevMitsui.total + prevView.total)}\n`;
@@ -69,16 +83,16 @@ function buildCardUsageMessage(todayStr, results) {
       const cycleStart = getCycleStart(r.name, new Date());
       const cycleEnd = getCycleEnd(r.name, new Date());
       try {
-      const yesterdayTotal = getMtdYesterdayTotalCached(r.name, cycleStart, cycleEnd);
-      const diff = r.total - yesterdayTotal;
-      if (yesterdayTotal === 0 && toYmd(cycleStart) === formatDate(new Date())) {
-        message += `${r.name}：¥${formatJPY(r.total)}（今日からの新サイクル）\n`;
-      } else {
-        message += `${r.name}：¥${formatJPY(r.total)}（前日より${diff >= 0 ? '+' : '-'}¥${formatJPY(Math.abs(diff))}）\n`;
-      }
-      totalAll += r.total; diffAll += diff;
+        const yesterdayTotal = getMtdYesterdayTotalCached(r.name, cycleStart, cycleEnd);
+        const diff = r.total - yesterdayTotal;
+        if (yesterdayTotal === 0 && toYmd(cycleStart) === formatDate(new Date())) {
+          message += `${r.name}：¥${formatJPY(r.total)}（今日からの新サイクル）\n`;
+        } else {
+          message += `${r.name}：¥${formatJPY(r.total)}（前日より${diff >= 0 ? '+' : '-'}¥${formatJPY(Math.abs(diff))}）\n`;
+        }
+        totalAll += r.total; diffAll += diff;
       } catch (e) {
-        console.error(`Error processing ${r.name}:`, e);
+        logError(`Error processing ${r.name}:`, e);
         message += `${r.name}：¥${formatJPY(r.total)}（前日比較不可）\n`;
         totalAll += r.total;
       }
@@ -89,23 +103,55 @@ function buildCardUsageMessage(todayStr, results) {
   return message;
 }
 /**
- * LINEへメッセージをPush送信する
+ * LINEへメッセージをPush送信する（リトライロジック付き）
  * @param {string} message - 送信するテキスト
+ * @param {number} [retryCount] - リトライ回数（内部使用）
  * @throws {Error} LINE情報未設定・送信失敗時
  * @returns {void}
  */
-function sendLineMessageByPush(message) {
+function sendLineMessageByPush(message, retryCount = 0) {
   const props = PropertiesService.getScriptProperties();
   const token = props.getProperty(CONFIG.PROPS.CHANNEL_ACCESS_TOKEN);
   const to = props.getProperty(CONFIG.PROPS.LINE_TO_USER_ID);
-  if (!token || !to) throw new Error('LINE情報が未設定');
-  const res = UrlFetchApp.fetch('https://api.line.me/v2/bot/message/push', {
-    method: 'post',
-    headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
-    payload: JSON.stringify({ to, messages: [{ type: 'text', text: message }] }),
-    muteHttpExceptions: true
-  });
-  if (res.getResponseCode() < 200 || res.getResponseCode() >= 300) throw new Error(`LINE送信失敗: ${res.getContentText()}`);
+
+  if (!token || !to) {
+    logError('LINE情報が未設定です');
+    throw new Error('LINE情報が未設定');
+  }
+
+  try {
+    const res = UrlFetchApp.fetch('https://api.line.me/v2/bot/message/push', {
+      method: 'post',
+      headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+      payload: JSON.stringify({ to, messages: [{ type: 'text', text: message }] }),
+      muteHttpExceptions: true
+    });
+
+    const statusCode = res.getResponseCode();
+
+    if (statusCode >= 200 && statusCode < 300) {
+      logInfo('LINE送信成功');
+      return; // 成功
+    }
+
+    // エラーレスポンス
+    const errorBody = res.getContentText();
+    logWarn(`LINE送信失敗 (HTTP ${statusCode}): ${errorBody}`);
+    throw new Error(`LINE送信失敗 (HTTP ${statusCode}): ${errorBody}`);
+
+  } catch (error) {
+    // リトライ判定
+    if (retryCount < CONFIG.RETRY.MAX_ATTEMPTS - 1) {
+      const delay = CONFIG.RETRY.INITIAL_DELAY_MS * Math.pow(2, retryCount); // 指数バックオフ
+      logWarn(`LINE送信リトライ ${retryCount + 1}/${CONFIG.RETRY.MAX_ATTEMPTS - 1} (${delay}ms後)`);
+      Utilities.sleep(delay);
+      return sendLineMessageByPush(message, retryCount + 1); // 再帰的リトライ
+    }
+
+    // 最終的に失敗
+    logError('LINE送信が最終的に失敗しました', error);
+    throw error;
+  }
 }
 /**
  * Gmailからカード利用額を集計（キャッシュ・ビューカード重複排除対応）
@@ -120,7 +166,7 @@ function sumMonthlyAmountFromGmail(query, cardName, startInclusive, endInclusive
   if (mailCache[cacheKey] !== undefined) return mailCache[cacheKey];
 
   let total = 0;
-  let threads = GmailApp.search(query, 0, 500);
+  let threads = GmailApp.search(query, 0, CONFIG.GMAIL.SEARCH.MAX_RESULTS);
 
   // ビューカード 0件フォールバック（subject ゆるめ）
   if (threads.length === 0 && cardName === 'ビューカード' && startInclusive && endInclusive) {
@@ -131,7 +177,7 @@ function sumMonthlyAmountFromGmail(query, cardName, startInclusive, endInclusive
       `after:${formatDate(addDays(startInclusive, -1))}`,
       `before:${formatDate(addDays(endInclusive, +1))}`,
     ].join(' ');
-    console.info('View fallback query:', fallback);
+    logInfo('View fallback query:', fallback);
     threads = GmailApp.search(fallback, 0, 500);
   }
 
@@ -144,7 +190,7 @@ function sumMonthlyAmountFromGmail(query, cardName, startInclusive, endInclusive
         const usageDate = extractUsageDate(text, cardName);
         const basisDate = usageDate || msg.getDate();
         if (startInclusive && endInclusive && !inRangeInclusive(basisDate, startInclusive, endInclusive)) {
-          console.log(`${cardName}の利用を除外:`, {
+          logDebug(`${cardName}の利用を除外:`, {
             利用日: toYmd(basisDate),
             サイクル開始: toYmd(startInclusive),
             サイクル終了: toYmd(endInclusive)
@@ -220,8 +266,8 @@ function buildQueryForCard(cardName, startInclusive, endInclusive) {
   if (!src) throw new Error(`未定義のカード: ${cardName}`);
 
   // メール受信日のマージンを広げる（利用日とメール受信日のずれを考慮）
-  const afterDate = addDays(startInclusive, -2); // 開始日の2日前
-  const beforeDate = addDays(endInclusive, +2);  // 終了日の2日後
+  const afterDate = addDays(startInclusive, -CONFIG.GMAIL.SEARCH.DATE_MARGIN_BEFORE);
+  const beforeDate = addDays(endInclusive, +CONFIG.GMAIL.SEARCH.DATE_MARGIN_AFTER);
 
   let subjectPart = '';
   if (cardName === 'ビューカード') {
@@ -395,7 +441,7 @@ function toYmd(d) {
 function getMtdYesterdayTotalCached(cardName, cycleStart, cycleEnd) {
   const props = PropertiesService.getScriptProperties();
   const lock = LockService.getScriptLock();
-  lock.tryLock(3000); // 競合実行の保護（任意）
+  lock.tryLock(CONFIG.CACHE.LOCK_TIMEOUT_MS);
 
   try {
     const today = new Date();
@@ -411,18 +457,18 @@ function getMtdYesterdayTotalCached(cardName, cycleStart, cycleEnd) {
 
     // 前日がサイクル開始より前の場合
     if (compareYmd(yEnd, cycleStart) < 0) {
-      console.log(`${cardName}: サイクル開始日(${toYmd(cycleStart)})のため、前日比較なし`);
+      logInfo(`${cardName}: サイクル開始日(${toYmd(cycleStart)})のため、前日比較なし`);
       // サイクル開始日の場合は、現在の値を初期値として保存
       if (compareYmd(new Date(), cycleStart) === 0) {
         const today = new Date();
         const query = buildQueryForCard(cardName, cycleStart, today);
-        console.log(`サイクル開始日の初期値を集計 - ${cardName}:`, {
+        logDebug(`サイクル開始日の初期値を集計 - ${cardName}:`, {
           query,
           start: toYmd(cycleStart),
           end: toYmd(today)
         });
         const currentTotal = sumMonthlyAmountFromGmail(query, cardName, cycleStart, today);
-        console.log(`サイクル開始日の集計結果 - ${cardName}:`, currentTotal);
+        logDebug(`サイクル開始日の集計結果 - ${cardName}:`, currentTotal);
         props.setProperty(lastDateKey, toYmd(new Date()));
         props.setProperty(lastTotalKey, String(currentTotal));
       }

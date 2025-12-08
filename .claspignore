@@ -1,0 +1,21 @@
+# .claspignore
+
+# Git関連
+.git/
+.gitignore
+
+# ドキュメント
+*.md
+README*
+
+# IDE設定
+.vscode/
+.idea/
+
+# Node.js
+node_modules/
+package.json
+package-lock.json
+
+# その他
+.DS_Store

@@ -19,12 +19,27 @@ const CONFIG = {
         CYCLE_END: 5      // 翌月5日終了
       },
     ],
+    SEARCH: {
+      MAX_RESULTS: 500,        // 検索結果の最大件数
+      DATE_MARGIN_BEFORE: 2,   // メール検索の前マージン（日）
+      DATE_MARGIN_AFTER: 2,    // メール検索の後マージン（日）
+    }
   },
   PROPS: {
     LAST_TOTAL: 'lastTotalAmount',
     LAST_DATE: 'lastSavedDate',
     CHANNEL_ACCESS_TOKEN: 'CHANNEL_ACCESS_TOKEN',
     LINE_TO_USER_ID: 'LINE_TO_USER_ID',
+  },
+  MESSAGE: {
+    EARLY_MONTH_THRESHOLD: 5,  // 月初メッセージ切替日（この日以下なら前月表示）
+  },
+  RETRY: {
+    MAX_ATTEMPTS: 3,           // 最大リトライ回数
+    INITIAL_DELAY_MS: 1000,    // 初回リトライ前の待機時間（ミリ秒）
+  },
+  CACHE: {
+    LOCK_TIMEOUT_MS: 3000,     // ロックタイムアウト（ミリ秒）
   },
   TZ: 'Asia/Tokyo',
 };
@@ -75,10 +90,10 @@ function getCycleStart(cardName, refDate) {
   const m = refDate.getMonth();    // 0-based
   const d = refDate.getDate();
 
-    // ref 日が開始日より前なら「前月の開始日」、それ以外は「当月の開始日」
-    return (d < src.CYCLE_START)
-      ? new Date(y, m - 1, src.CYCLE_START)
-      : new Date(y, m, src.CYCLE_START);
+  // ref 日が開始日より前なら「前月の開始日」、それ以外は「当月の開始日」
+  return (d < src.CYCLE_START)
+    ? new Date(y, m - 1, src.CYCLE_START)
+    : new Date(y, m, src.CYCLE_START);
 }
 
 function getCycleEnd(cardName, refDate) {
@@ -134,7 +149,7 @@ function inRangeInclusive(d, start, end) {
  */
 function getCycleRange(cardName, refDate = new Date()) {
   const start = getCycleStart(cardName, refDate);
-  const end   = getCycleEnd(cardName, refDate);
+  const end = getCycleEnd(cardName, refDate);
   return { start, end };
 }
 
@@ -148,7 +163,7 @@ function getPrevCycleRange(cardName, refDate = new Date()) {
   const currentStart = getCycleStart(cardName, refDate);
   const prevRef = addDays(currentStart, -1);
   const start = getCycleStart(cardName, prevRef);
-  const end   = getCycleEnd(cardName, prevRef);
+  const end = getCycleEnd(cardName, prevRef);
   return { start, end };
 }
 
@@ -162,7 +177,7 @@ function normalizeDigits(s) {
     return s.normalize('NFKC');
   } catch (e) {
     return s
-      .replace(/[０-９]/g, function(ch){ return String.fromCharCode(ch.charCodeAt(0) - 0xFEE0); })
+      .replace(/[０-９]/g, function (ch) { return String.fromCharCode(ch.charCodeAt(0) - 0xFEE0); })
       .replace(/[－―ー‐]/g, '-')
       .replace(/[，]/g, ',')
       .replace(/[：]/g, ':')
